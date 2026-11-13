@@ -60,7 +60,8 @@ python plugins\neko_image_embed\tools\fetch_model.py --check   # 只校验
 | 键 | 作用 |
 |---|---|
 | `[image_embed.judge].mode` | 判断层：`model` / `host` / `heuristic`（面板可切换） |
-| `[image_embed.judge].perception` | 识图链，默认 `["sensenova","zeroshot"]` |
+| `[image_embed.judge].perception` | 识图链，默认 `["sensenova","zeroshot"]`；自定义端点写这里 |
+| `[image_embed.judge].order` | 判断层候选，只认内置名，自定义端点不在这里生效 |
 | `[image_embed].min_value` | 价值分下限，默认 0.45 |
 | `[image_embed].max_risk` | 任一风险维度上限，默认 0.60 |
 | `[image_embed.embedder].backend` | `auto` / `clip_onnx` / `caption_text` / `external` |

@@ -62,6 +62,8 @@ external_dim = 0
 # 逐级降级；任何一级失败都记进 errors 再走下一级。
 # zeroshot 是本地 CLIP 零样本打标（不需要模型、不需要密钥、不联网），
 # gateway 绑不上槽位时它就是主力；rules 永远兜底。
+# order 只认内置名（gateway/model/laya/kev/semif/jev/rules/zeroshot）。
+# 自定义端点写进下面的 perception，判断层用 mode 选。
 order = ["gateway", "zeroshot", "laya", "kev", "semif", "jev", "rules"]
 timeout_seconds = 60
 max_completion_tokens = 700

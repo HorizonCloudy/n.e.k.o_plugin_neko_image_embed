@@ -316,9 +316,14 @@ def load_settings(raw: Any) -> Settings:
     if isinstance(order_raw, (list, tuple)):
         for item in order_raw:
             name = str(item).strip()
-            if name in engines or name in LOCAL_ENGINES:
+            if name in KNOWN_ENGINES or name in LOCAL_ENGINES:
                 if name not in order:
                     order.append(name)
+            elif name in engines:
+                warnings.append(
+                    f"judge.order: {name!r} 只在识图链生效（judge.perception），"
+                    f"判断层候选由 judge.mode 决定"
+                )
             else:
                 warnings.append(f"judge.order: 忽略未知引擎 {name!r}")
     else:

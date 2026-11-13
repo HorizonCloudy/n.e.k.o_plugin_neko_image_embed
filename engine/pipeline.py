@@ -418,15 +418,27 @@ def collect_garbage(
     removed: list[int] = []
     failures: list[str] = []
 
-    targets = store.take_deleted(before=deleted_before, limit=limit)
+    targets = [
+        (row, 1) for row in store.take_deleted(before=deleted_before, limit=limit)
+    ]
     if keep is not None and len(targets) < limit:
-        targets += store.take_oldest(keep=keep, limit=limit - len(targets))
+        targets += [
+            (row, 0) for row in store.take_oldest(keep=keep, limit=limit - len(targets))
+        ]
 
     seen: set[int] = set()
-    for row in targets:
+    for row, expect in targets:
         if row.id in seen:
             continue
         seen.add(row.id)
+        try:
+            # 先删记录再删文件：这条记录要是被人复活了，DELETE 匹配 0 行，文件必须留下。
+            if not store.hard_delete(row.id, expect_deleted=expect):
+                continue
+            removed.append(row.id)
+        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断整批
+            failures.append(f"#{row.id}: {type(exc).__name__}: {exc}")
+            continue
         for rel in (row.rel_path, row.thumb_path):
             if not rel:
                 continue
@@ -436,10 +448,5 @@ def collect_garbage(
                 failures.append(f"#{row.id}: {exc}")
                 continue
             _remove_quietly(target)
-        try:
-            store.hard_delete(row.id)
-            removed.append(row.id)
-        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断整批
-            failures.append(f"#{row.id}: {type(exc).__name__}: {exc}")
 
     return {"removed": removed, "failures": failures}

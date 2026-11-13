@@ -294,7 +294,9 @@ def test_custom_engine_name_is_accepted() -> None:
         }
     )
     assert settings.judge.perception == ("myvl", "zeroshot")
-    assert settings.judge.order == ("myvl", "rules")
+    # order 是判断层的候选，只认内置名；自定义端点在识图链生效并给出警告
+    assert settings.judge.order == ("rules",)
+    assert any("myvl" in note for note in settings.warnings)
     assert settings.judge.engines["myvl"].ready() is True
 
 

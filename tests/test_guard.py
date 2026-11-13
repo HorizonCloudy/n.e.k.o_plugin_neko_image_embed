@@ -98,10 +98,14 @@ def test_metrics_are_stable_for_same_pixels() -> None:
     assert first.pixel_sha == second.pixel_sha
 
 def test_internal_url_targets_are_blocked() -> None:
-    for host in ("127.0.0.1", "::1", "10.0.0.7", "192.168.1.1", "169.254.169.254",
-                 "localhost", "db.internal", "[fd00::1]", ""):
+    blocked = ("127.0.0.1", "::1", "10.0.0.7", "192.168.1.1", "169.254.169.254",
+               "localhost", "db.internal", "[fd00::1]", "",
+               "127.1", "2130706433", "0x7f000001", "100.64.0.1",
+               "[::ffff:127.0.0.1]", "[::ffff:100.100.100.200]")
+    for host in blocked:
         assert is_blocked_target(host) is True, host
-    for host in ("93.184.216.34", "example.com", "img.example.test", "2001:4860:4860::8888"):
+    for host in ("93.184.216.34", "example.com", "img.example.test",
+                 "2001:4860:4860::8888", "cafe.babe"):
         assert is_blocked_target(host) is False, host
 
 
@@ -121,7 +125,8 @@ def test_persona_scope_gate() -> None:
     assert resolve_persona_scope("YUI", "YUI", False) == ("YUI", False)
     assert resolve_persona_scope("阿香", "YUI", True) == ("阿香", False)
     assert resolve_persona_scope("阿香", "YUI", False) == ("YUI", True)
-    assert resolve_persona_scope("阿香", "", False) == ("阿香", False)
+    # 当前角色未知时开关关着，也不许自己点档口
+    assert resolve_persona_scope("阿香", "", False) == ("", True)
 
 
 def test_new_gates_default_to_old_behaviour() -> None:

@@ -51,7 +51,7 @@ from .engine.guard import (
 )
 from .engine.judge import JudgeChain
 from .engine.judges.gateway import ensure_sdk_imported
-from .engine.lexicon import mark_untrusted
+from .engine.lexicon import UNTRUSTED_MARK, mark_untrusted
 from .engine.media import human_bytes
 from .engine.persona import default_characters_path, load_persona
 from .engine.personas import PersonaArchives
@@ -480,7 +480,8 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         settings = await self._settings_snapshot()
         target, ignored = resolve_persona_scope(explicit_name, host, settings.allow_cross_persona)
         if ignored:
-            self._log("warn", f"忽略跨角色请求 {explicit_name}，按当前角色 {target} 处理")
+            where = f"按当前角色 {target} 处理" if target else "当前角色未知，直接拒绝"
+            self._log("warn", f"忽略跨角色请求 {explicit_name}，{where}")
         return target
 
     # ------------------------------------------------------------------ 图片来源
@@ -1322,13 +1323,21 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         return hashlib.sha256(data).hexdigest()
 
 
+def _tags_view(tags: Any, mark: bool) -> list[str]:
+    """给模型看的那一路在首位放标记。caption 为空时警告也不会丢。"""
+    out = [str(item) for item in (tags or [])]
+    if mark and out:
+        out.insert(0, UNTRUSTED_MARK)
+    return out
+
+
 def _row_view(row: Any, score: float, mark: bool = False) -> dict[str, object]:
     """一行结果。mark=True 给 caption 加标记，给模型看的出口都走它。"""
     return {
         "id": int(row.id),
         "score": round(float(score), 4),
         "caption": mark_untrusted(row.caption) if mark else row.caption,
-        "tags": list(row.tags),
+        "tags": _tags_view(row.tags, mark),
         "sticker": bool(row.sticker),
         "engine": row.engine,
         "modality": row.modality,

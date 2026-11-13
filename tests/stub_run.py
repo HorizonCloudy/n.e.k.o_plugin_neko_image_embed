@@ -371,7 +371,9 @@ async def run() -> int:
         str(hit.get("caption"))[:32],
     )
     board = await plugin.img_board(query="猫", limit=3, include_thumb=False)
-    panel_hit = ((board.value or {}).get("results") or [{}])[0]
+    panel_items = (board.value or {}).get("items") or []
+    check(len(panel_items) >= 1, "面板查询有结果", str(len(panel_items)))
+    panel_hit = panel_items[0] if panel_items else {}
     check(
         isinstance(board, Ok) and not str(panel_hit.get("caption") or "").startswith(UNTRUSTED_MARK),
         "面板那一路不加标记（给人看的没有这层噪音）",

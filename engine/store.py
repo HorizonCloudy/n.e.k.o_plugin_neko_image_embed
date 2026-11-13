@@ -449,10 +449,12 @@ class ImageStore:
         if lanlan:
             clause += " AND lanlan=?"
             params.append(lanlan)
-        rows = self.conn.execute(
-            f"SELECT * FROM images WHERE {clause} ORDER BY created_at DESC LIMIT ?",
-            (*params, int(max_scan_rows) + 1),
-        ).fetchall()
+        with self._lock:
+            # 检索现在跑在工作线程里，可能撞上未提交的写事务，所以读数也要拿锁。
+            rows = self.conn.execute(
+                f"SELECT * FROM images WHERE {clause} ORDER BY created_at DESC LIMIT ?",
+                (*params, int(max_scan_rows) + 1),
+            ).fetchall()
         truncated = len(rows) > max_scan_rows
         rows = rows[:max_scan_rows]
         if not rows:
@@ -533,9 +535,15 @@ class ImageStore:
         ).fetchall()
         return [_row_to_image(row) for row in rows]
 
-    def hard_delete(self, image_id: int) -> bool:
+    def hard_delete(self, image_id: int, *, expect_deleted: int | None = None) -> bool:
+        """expect_deleted 给定时，状态变了就不删并返回 False（回收路径用它）。"""
+        sql = "DELETE FROM images WHERE id=?"
+        params: tuple[object, ...] = (image_id,)
+        if expect_deleted is not None:
+            sql += " AND deleted=?"
+            params = (image_id, int(expect_deleted))
         with self._lock:
-            cursor = self.conn.execute("DELETE FROM images WHERE id=?", (image_id,))
+            cursor = self.conn.execute(sql, params)
             self.conn.commit()
             return cursor.rowcount > 0
 

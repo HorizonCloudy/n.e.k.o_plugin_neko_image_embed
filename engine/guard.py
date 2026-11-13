@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -190,6 +191,12 @@ def digest_for_prompt(metrics: Metrics | None, probe: Probe | None) -> str:
 # --------------------------------------------------------------------------- 来源闸门
 
 
+# 看着像 IP 字面量而不是域名的字符集。127.1 / 2130706433 / 0x7f000001 过不了
+# ipaddress 的严格解析，但 glibc 会把它们解成环回，所以一律拒。
+# 代价：cafe1.babe 这类「全是十六进制味又带数字」的域名会被误拒，宁可错杀。
+_NUMERICISH = re.compile(r"[0-9a-fA-FxX.:%_-]+")
+
+
 def is_blocked_target(host: str) -> bool:
     """URL 主机是否指向本机或内网。默认拦，免得 source=url 变成内网探针。"""
     name = (host or "").strip().lower().rstrip(".")
@@ -203,9 +210,11 @@ def is_blocked_target(host: str) -> bool:
     try:
         address = ipaddress.ip_address(literal)
     except ValueError:
-        # shortcut: 域名不做 DNS 解析，所以「域名指向 127.0.0.1」这一类拦不住；
+        # shortcut: 普通域名不做 DNS 解析，所以「域名指向 127.0.0.1」这一类拦不住；
         # 真要拦得连上之后再校验地址，等碰上再说。
-        return False
+        return bool(_NUMERICISH.fullmatch(literal) and any(ch.isdigit() for ch in literal))
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped  # 早的 3.11 补丁版会把映射地址判成 global
     return not address.is_global
 
 
@@ -215,8 +224,11 @@ def resolve_persona_scope(requested: str, current: str, allow_cross: bool) -> tu
     now = (current or "").strip()
     if not wanted or wanted == now:
         return now, False
-    if not now or allow_cross:
+    if allow_cross:
         return wanted, False
+    if not now:
+        # 当前角色未知也要拒：否则关了开关反而只剩「自己指定档口」一条路。
+        return "", True
     return now, True
 
 
