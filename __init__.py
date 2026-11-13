@@ -44,8 +44,14 @@ from plugin.sdk.plugin import (
 
 from .engine.config import Settings, load_settings
 from .engine.embed.registry import EmbeddingRegistry
+from .engine.guard import (
+    is_blocked_target,
+    path_roots_refusal,
+    resolve_persona_scope,
+)
 from .engine.judge import JudgeChain
 from .engine.judges.gateway import ensure_sdk_imported
+from .engine.lexicon import mark_untrusted
 from .engine.media import human_bytes
 from .engine.persona import default_characters_path, load_persona
 from .engine.personas import PersonaArchives
@@ -179,6 +185,19 @@ def _receipt_state(receipt: object) -> tuple[bool, str]:
     if receipt.get("submitted"):
         return True, ""
     return False, str(receipt.get("reason") or "rejected")
+
+
+class _NoPrivateRedirect(urllib.request.HTTPRedirectHandler):
+    """重定向也要过同一条内网线，否则第一次检查等于没做。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlsplit(newurl)
+        if target.scheme not in {"http", "https"} or is_blocked_target(target.hostname or ""):
+            raise ValueError("图片地址被重定向到本机或内网，已中止")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_URL_OPENER = urllib.request.build_opener(_NoPrivateRedirect)
 
 
 def _strip_data_url(value: str) -> tuple[str, str]:
@@ -346,7 +365,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
                 if "zeroshot" not in settings.judge.perception:
                     self._log(
                         "warning",
-                        "识图链（judge.perception）里没有 zeroshot：Sensenova 不可用时会没有 "
+                        "识图链（judge.perception）里没有 zeroshot：视觉端点不可用时会没有 "
                         "caption/tags 兜底；建议保留 perception = [\"sensenova\", \"zeroshot\"]",
                     )
                 embedder = EmbeddingRegistry(
@@ -449,15 +468,20 @@ class NekoImageEmbedPlugin(NekoPluginBase):
 
         面板与外部调用常常拿不到 ``ctx.current_lanlan``，这里必须退到宿主自己的
         人设配置，否则会静默落进「公共桶」（lanlan=''），人设隔离就形同虚设。
+
+        allow_cross_persona=false 时，指名别的角色会被忽略，并记一条 warn。
         """
-        name = self._resolve_lanlan(explicit, kwargs or {}) or self._current_lanlan()
-        if name:
-            return name
-        await self._persona_text()
-        persona = self._persona_cache
-        if persona is not None and persona.name:
-            return str(persona.name)
-        return ""
+        explicit_name = self._resolve_lanlan(explicit, kwargs or {})
+        host = self._current_lanlan()
+        if not host:
+            await self._persona_text()
+            persona = self._persona_cache
+            host = str(persona.name) if persona is not None and persona.name else ""
+        settings = await self._settings_snapshot()
+        target, ignored = resolve_persona_scope(explicit_name, host, settings.allow_cross_persona)
+        if ignored:
+            self._log("warn", f"忽略跨角色请求 {explicit_name}，按当前角色 {target} 处理")
+        return target
 
     # ------------------------------------------------------------------ 图片来源
 
@@ -489,6 +513,9 @@ class NekoImageEmbedPlugin(NekoPluginBase):
             target = Path(path).expanduser()
             if not target.is_file():
                 raise ValueError(f"文件不存在：{target}")
+            refusal = path_roots_refusal(target, settings.path_roots)
+            if refusal:
+                raise ValueError(f"本地路径不在允许范围内：{refusal}")
             if target.stat().st_size > limit:
                 raise ValueError(f"文件 {human_bytes(target.stat().st_size)} 超过上限 {human_bytes(limit)}")
             return await asyncio.to_thread(target.read_bytes), mime or ""
@@ -511,9 +538,11 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         parsed = urlsplit(url or "")
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("只接受 http/https 图片地址")
+        if is_blocked_target(parsed.hostname):
+            raise ValueError("不接受指向本机或内网的图片地址")
         request = urllib.request.Request(url, headers={"user-agent": "neko-image-embed/0.1"})
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with _URL_OPENER.open(request, timeout=20) as response:
                 chunks: list[bytes] = []
                 total = 0
                 while True:
@@ -723,19 +752,21 @@ class NekoImageEmbedPlugin(NekoPluginBase):
                 payload, _ = _strip_data_url(image_b64)
                 raw = base64.b64decode(payload, validate=True)
                 vector = await pipeline.embed_image_bytes(raw)
-                rows, truncated = store.search(
+                rows, truncated = await asyncio.to_thread(
+                    store.search,
                     vector,
                     lanlan=scope,
                     top_k=limit,
                     max_scan_rows=settings.storage.max_scan_rows,
                 )
             elif int(image_id or 0) > 0:
-                row = store.get(int(image_id))
+                row = await asyncio.to_thread(store.get, int(image_id))
                 if row is None:
                     return Err(SdkError(f"找不到图片 #{image_id}", code="NOT_FOUND"))
                 raw = await asyncio.to_thread(self._media_file(row.rel_path, scope).read_bytes)
                 vector = await pipeline.embed_image_bytes(raw, caption=row.caption)
-                rows, truncated = store.search(
+                rows, truncated = await asyncio.to_thread(
+                    store.search,
                     vector,
                     lanlan=scope,
                     top_k=limit,
@@ -755,7 +786,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
             {
                 "count": len(rows),
                 "truncated": truncated,
-                "results": [_row_view(row, score) for row, score in rows],
+                "results": [_row_view(row, score, mark=True) for row, score in rows],
             }
         )
 
@@ -999,7 +1030,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
             return Err(SdkError(self._init_error or "插件尚未就绪", code="NOT_READY"))
 
         # 一次只打开一个角色的存档；面板用 persona 切换查看哪一档，不做跨档合并。
-        target = (persona or "").strip() or await self._persona_identity(lanlan, kwargs)
+        target = await self._persona_identity(persona or lanlan, kwargs)
         if not target:
             return Err(SdkError("无法确定当前角色；请显式传 persona/lanlan", code="NO_PERSONA"))
         store = await self._store_for(target)
@@ -1038,7 +1069,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         _pipeline, archives = await self._require()
         if archives is None:
             return Err(SdkError(self._init_error or "插件尚未就绪", code="NOT_READY"))
-        target = (persona or "").strip() or await self._persona_identity()
+        target = await self._persona_identity(persona)
         if not target:
             return Err(SdkError("无法确定当前角色", code="NO_PERSONA"))
         store = await self._store_for(target)
@@ -1071,6 +1102,11 @@ class NekoImageEmbedPlugin(NekoPluginBase):
             return Err(
                 SdkError("需要目标角色：显式传 lanlan（不会默认搬回当前角色）", code="INVALID_ARGUMENT")
             )
+        if source != target and not (await self._settings_snapshot()).allow_cross_persona:
+            return Err(SdkError(
+                "跨角色迁移被挡住：image_embed.allow_cross_persona=false",
+                code="CROSS_PERSONA_FORBIDDEN",
+            ))
         try:
             new_id = await asyncio.to_thread(
                 archives.move,
@@ -1147,7 +1183,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
                 query, lanlan=scope, top_k=max(1, min(int(top_k), 20))
             )
             return {"count": len(rows), "truncated": truncated,
-                    "results": [_row_view(row, score) for row, score in rows]}
+                    "results": [_row_view(row, score, mark=True) for row, score in rows]}
         except Exception as exc:  # noqa: BLE001
             return {"output": {"reason": f"{type(exc).__name__}: {exc}"}, "is_error": True,
                     "error": "IMAGE_MEMORY_SEARCH_FAILED"}
@@ -1175,7 +1211,11 @@ class NekoImageEmbedPlugin(NekoPluginBase):
                 return {"output": {"reason": "无法确定当前角色，已按人设隔离策略拒绝"},
                         "is_error": True, "error": "IMAGE_MEMORY_NO_PERSONA"}
             store = await self._store_for(lanlan)
-            row = store.get(int(image_id or 0)) if int(image_id or 0) > 0 else None
+            row = (
+                await asyncio.to_thread(store.get, int(image_id or 0))
+                if int(image_id or 0) > 0
+                else None
+            )
             if row is not None and row.lanlan and row.lanlan != lanlan:
                 return {"output": {"reason": "这张图不属于当前角色"},
                         "is_error": True, "error": "IMAGE_MEMORY_FORBIDDEN"}
@@ -1229,7 +1269,12 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         submitted, reason = _receipt_state(receipt)
         if not submitted:
             raise RuntimeError(f"消息被拒：{reason}")
-        return {"sent": True, "id": int(row.id), "caption": row.caption, "lanlan": target}
+        return {
+            "sent": True,
+            "id": int(row.id),
+            "caption": mark_untrusted(row.caption),
+            "lanlan": target,
+        }
 
     # ------------------------------------------------------------------ 定时器
 
@@ -1257,7 +1302,7 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         if not lanlan:
             return Ok({"skipped": "无法确定当前角色"})
         store = await self._store_for(lanlan)
-        if store.find_by_sha(self._sha(data), lanlan):
+        if await asyncio.to_thread(store.find_by_sha, self._sha(data), lanlan):
             return Ok({"skipped": "该帧已收录"})
         persona = await self._persona_text()
         result = await pipeline.run(data, mime=mime, lanlan=lanlan, persona_text=persona)
@@ -1277,11 +1322,12 @@ class NekoImageEmbedPlugin(NekoPluginBase):
         return hashlib.sha256(data).hexdigest()
 
 
-def _row_view(row: Any, score: float) -> dict[str, object]:
+def _row_view(row: Any, score: float, mark: bool = False) -> dict[str, object]:
+    """一行结果。mark=True 给 caption 加标记，给模型看的出口都走它。"""
     return {
         "id": int(row.id),
         "score": round(float(score), 4),
-        "caption": row.caption,
+        "caption": mark_untrusted(row.caption) if mark else row.caption,
         "tags": list(row.tags),
         "sticker": bool(row.sticker),
         "engine": row.engine,

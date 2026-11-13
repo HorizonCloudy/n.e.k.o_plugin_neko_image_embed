@@ -181,8 +181,8 @@ class HttpJudge:
 
         should = _choice_to_bool(normalized.get("should_embed"))
         value = _score_to_unit(normalized.get("value"))
-        # SystemOne（kev/jev）会给出选项概率；它比 5 档 score 更能反映置信度，
-        # 取两者较大值，避免「收录但 score=1.7/4」被 min_value 误杀。
+        # SystemOne（kev/jev）会给出「收录」概率。下面的 value 用它覆盖 5 档
+        # score：5 档太粗，概率才分得出「勉强收录」和「一定收录」。
         choice = normalized.get("should_embed")
         if isinstance(choice, dict):
             probs = choice.get("probabilities")
@@ -293,7 +293,8 @@ def _score_to_unit(value: object) -> float:
             return 0.0
     if number is None or number != number:
         return 0.0
-    if number <= 1.0:
+    # 恰好 1.0 按 1-5 档的最低分处理：这一层只发 5 档标签，宁可漏收也不误收。
+    if number < 1.0:
         return min(max(number, 0.0), 1.0)
     if number <= 5.0:
         return min(max((number - 1.0) / 4.0, 0.0), 1.0)

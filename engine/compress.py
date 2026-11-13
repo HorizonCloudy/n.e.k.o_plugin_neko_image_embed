@@ -17,6 +17,9 @@ from PIL import Image
 
 _QUALITY_FLOOR = 48
 _MIN_EDGE = 320
+# 每缩一档尺寸都要重走一遍质量阶梯（约 7 次保存）：长边 4096 缩到 320 需要 12 档，
+# 最坏约 84 次。真正的「压不动」由 _MIN_EDGE 处的 break 判定，这里只是保险丝。
+_MAX_ATTEMPTS = 96
 
 
 class CompressError(RuntimeError):
@@ -58,7 +61,7 @@ def compress(
     base = fit_within(strip_metadata(image), long_edge)
     current_quality = quality
 
-    for _ in range(10):
+    for _ in range(_MAX_ATTEMPTS):
         buffer = io.BytesIO()
         base.save(buffer, format="JPEG", quality=current_quality, optimize=True, progressive=True)
         payload = buffer.getvalue()

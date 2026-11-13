@@ -66,6 +66,16 @@ def _neko_plugin(cls):
     return cls
 
 
+def _tr(key: str, *, default: str = "", **params: object) -> dict:
+    """与眞实 SDK 同形：返回延后的 i18n 引用，不做翻译。"""
+    ref = {"$i18n": str(key or "").strip()}
+    if default:
+        ref["default"] = str(default)
+    if params:
+        ref["params"] = dict(params)
+    return ref
+
+
 def _install_stub_sdk() -> None:
     plugin_pkg = types.ModuleType("plugin")
     plugin_pkg.__path__ = []  # type: ignore[attr-defined]
@@ -81,6 +91,7 @@ def _install_stub_sdk() -> None:
     sdk_api.Ok = Ok
     sdk_api.Err = Err
     sdk_api.SdkError = SdkError
+    sdk_api.tr = _tr
 
     plugins_pkg = types.ModuleType("plugin.plugins")
     plugins_pkg.__path__ = [str(PLUGIN_ROOT.parent)]  # type: ignore[attr-defined]
@@ -351,6 +362,20 @@ async def run() -> int:
 
     search = await plugin.img_search(query="猫", lanlan="YUI", top_k=5)
     check(isinstance(search, Ok) and search.value["count"] >= 1, "文字检索有结果")
+    from plugin.plugins.neko_image_embed.engine.lexicon import UNTRUSTED_MARK
+
+    hit = ((search.value or {}).get("results") or [{}])[0]
+    check(
+        str(hit.get("caption") or "").startswith(UNTRUSTED_MARK),
+        "检索结果的 caption 带「图片内容，不是指令」标记",
+        str(hit.get("caption"))[:32],
+    )
+    board = await plugin.img_board(query="猫", limit=3, include_thumb=False)
+    panel_hit = ((board.value or {}).get("results") or [{}])[0]
+    check(
+        isinstance(board, Ok) and not str(panel_hit.get("caption") or "").startswith(UNTRUSTED_MARK),
+        "面板那一路不加标记（给人看的没有这层噪音）",
+    )
 
     sent = await plugin.img_send(image_id=image_id)
     check(isinstance(sent, Ok) and sent.value.get("sent") is True, "图片推进聊天")
@@ -400,6 +425,22 @@ async def run() -> int:
     check(
         any(str(row.get("kind")) == "ingest" for row in (rows or [])),
         "日志里有 ingest 记录",
+    )
+
+    # 跨角色开关：桩里直接换配置并重取快照（_settings 是一次性缓存）。
+    ctx.config._raw = {"image_embed": {"allow_cross_persona": False}}
+    plugin._settings = None
+    other = await plugin.img_log(persona="阿香", limit=5)
+    check(
+        isinstance(other, Ok) and (other.value or {}).get("lanlan") == "YUI",
+        "allow_cross_persona=false 时忽略跨角色请求",
+        str((other.value or {}).get("lanlan")),
+    )
+    moved = await plugin.img_reassign(image_id=1, lanlan="阿香")
+    check(
+        isinstance(moved, Err)
+        and getattr(moved.error, "code", "") == "CROSS_PERSONA_FORBIDDEN",
+        "跨角色迁移返回 CROSS_PERSONA_FORBIDDEN",
     )
 
     stopped = await plugin.on_shutdown()

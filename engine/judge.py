@@ -1,6 +1,7 @@
 """两层：识图（perception）→ 判断（judgment）。
 
-**识图**只回答「图里有什么」：Sensenova 云端视觉，失败退本地 CLIP 零样本。
+**识图**只回答「图里有什么」：配置里的视觉端点（任意 OpenAI 兼容 / SystemOne），
+失败退本地 CLIP 零样本。
 **判断**只回答「这张图对这个角色值不值得记」，候选固定三种：
 
     model       —— 一个判断模型端点（SystemOne 或 OpenAI 兼容，laya/kev/jev 都只是它的实现）
@@ -65,6 +66,8 @@ class JudgeChain:
         cfg = self._settings.judge
         out: list[tuple[str, object]] = []
         for name in cfg.perception:
+            if name == "gateway":
+                continue  # 宿主槽位属于判断层，不参与识图
             if name == "zeroshot":
                 if self._embedder is not None:
                     out.append(

@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 
 from ..guard import Metrics, Probe
+from ..lexicon import mark_untrusted
 
 RISK_KEYS = ("nsfw", "violence", "politics", "pi")
 
@@ -226,5 +227,5 @@ def build_system_prompt(persona_text: str) -> str:
 def build_user_text(request: JudgeRequest) -> str:
     lines = ["请判断这张图是否值得收录进该角色的图像记忆。", f"图像指标：{request.digest}"]
     if request.caption_hint:
-        lines.append(f"本地预判描述：{request.caption_hint}")
+        lines.append(f"本地预判描述：{mark_untrusted(request.caption_hint)}")
     return "\n".join(lines)
