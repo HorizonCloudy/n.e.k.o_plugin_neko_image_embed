@@ -32,6 +32,8 @@ max_scan_rows = 20000            # 余弦全扫的行数上限，超过按最近
 # ---- 人设 ----
 persona_summary = ""             # 留空则读 <N.E.K.O>/config/characters.json
 characters_path = ""             # 留空走默认路径；换角色库时才填
+allow_cross_persona = true       # false = 只准碰当前角色的档（面板切档会一起被拒）
+path_roots = []                  # 非空则 source=path 只准读这些目录底下的图
 
 # ---- 自动收录 ----
 watch_frames = false             # img_watch 定时器：轮询 bus.frames 自动收录
@@ -60,9 +62,30 @@ external_dim = 0
 # 逐级降级；任何一级失败都记进 errors 再走下一级。
 # zeroshot 是本地 CLIP 零样本打标（不需要模型、不需要密钥、不联网），
 # gateway 绑不上槽位时它就是主力；rules 永远兜底。
+# order 只认内置名（gateway/model/laya/kev/semif/jev/rules/zeroshot）。
+# 自定义端点写进下面的 perception，判断层用 mode 选。
 order = ["gateway", "zeroshot", "laya", "kev", "semif", "jev", "rules"]
 timeout_seconds = 60
 max_completion_tokens = 700
+
+# 识图链：表名就是引擎名。新加一个 [image_embed.judge.<名字>] 表、把同一个名字写进
+# perception，就能接任何 OpenAI 兼容 / SystemOne 视觉端点；zeroshot 是本地兜底。
+perception = ["sensenova", "zeroshot"]
+
+[image_embed.judge.sensenova]
+enabled = false                  # 填好 base_url 与 api_key 再打开
+protocol = "openai_chat"
+base_url = ""
+api_key = ""
+model = ""
+vision = true
+
+# 换一家也一样，名字自己取：
+# [image_embed.judge.qwen_vl]
+# enabled = true
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# api_key = "sk-..."
+# model = "qwen-vl-plus"
 
 [image_embed.judge.laya]
 enabled = false

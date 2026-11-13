@@ -322,7 +322,7 @@ class ImageStore:
         dhash: int,
         vector: np.ndarray,
     ) -> tuple[int, bool]:
-        """返回 (id, created)。同 (sha256, lanlan) 已存在时返回旧 id 且 created=False。"""
+        """返回 (id, created)。同图已在档返回旧 id + created=False；已软删的同图复活并返回 True。"""
         if vector.size != self.dim:
             raise StoreError(f"向量维度 {vector.size} 与索引 {self.dim} 不一致")
         payload = encode_vector(vector)
@@ -348,9 +348,31 @@ class ImageStore:
                 return int(cursor.lastrowid or 0), True
             except sqlite3.IntegrityError:
                 row = self.conn.execute(
-                    "SELECT id FROM images WHERE sha256=? AND lanlan=?", (sha256, lanlan)
+                    "SELECT id, deleted FROM images WHERE sha256=? AND lanlan=?",
+                    (sha256, lanlan),
                 ).fetchone()
-                return (int(row["id"]) if row else 0), False
+                if row is None:
+                    return 0, False
+                if not row["deleted"]:
+                    return int(row["id"]), False
+                # 复活墓碑：媒体文件已按同一个 sha 重写，记录必须跟着回到在档状态，
+                # 否则调用方拿到「重复已收录」而实际仍是一条软删记录。
+                self.conn.execute(
+                    "UPDATE images SET deleted=0, deleted_at=NULL, created_at=?"
+                    ", pixel_sha=?, rel_path=?, thumb_path=?, width=?, height=?"
+                    ", bytes=?, mime=?, caption=?, tags=?, sticker=?, verdict=?"
+                    ", engine=?, modality=?, value=?, risk_max=?, reason=?"
+                    ", dhash=?, vector=?, dim=? WHERE id=?",
+                    (
+                        now, pixel_sha, rel_path, thumb_path, width, height,
+                        size_bytes, mime, caption, json.dumps(tags, ensure_ascii=False),
+                        int(sticker), verdict, engine, modality, float(value),
+                        float(risk_max), reason, to_signed64(int(dhash)), payload,
+                        int(self.dim), int(row["id"]),
+                    ),
+                )
+                self.conn.commit()
+                return int(row["id"]), True
 
     def touch(self, image_id: int) -> None:
         with self._lock:
@@ -427,10 +449,12 @@ class ImageStore:
         if lanlan:
             clause += " AND lanlan=?"
             params.append(lanlan)
-        rows = self.conn.execute(
-            f"SELECT * FROM images WHERE {clause} ORDER BY created_at DESC LIMIT ?",
-            (*params, int(max_scan_rows) + 1),
-        ).fetchall()
+        with self._lock:
+            # 检索现在跑在工作线程里，可能撞上未提交的写事务，所以读数也要拿锁。
+            rows = self.conn.execute(
+                f"SELECT * FROM images WHERE {clause} ORDER BY created_at DESC LIMIT ?",
+                (*params, int(max_scan_rows) + 1),
+            ).fetchall()
         truncated = len(rows) > max_scan_rows
         rows = rows[:max_scan_rows]
         if not rows:
@@ -511,9 +535,15 @@ class ImageStore:
         ).fetchall()
         return [_row_to_image(row) for row in rows]
 
-    def hard_delete(self, image_id: int) -> bool:
+    def hard_delete(self, image_id: int, *, expect_deleted: int | None = None) -> bool:
+        """expect_deleted 给定时，状态变了就不删并返回 False（回收路径用它）。"""
+        sql = "DELETE FROM images WHERE id=?"
+        params: tuple[object, ...] = (image_id,)
+        if expect_deleted is not None:
+            sql += " AND deleted=?"
+            params = (image_id, int(expect_deleted))
         with self._lock:
-            cursor = self.conn.execute("DELETE FROM images WHERE id=?", (image_id,))
+            cursor = self.conn.execute(sql, params)
             self.conn.commit()
             return cursor.rowcount > 0
 

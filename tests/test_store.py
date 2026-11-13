@@ -279,3 +279,18 @@ def test_lexical_boost_rescues_caption_hits(tmp_path) -> None:
         assert [row.id for row, _score in plain][0] == car_id
     finally:
         store.close()
+
+def test_readd_after_soft_delete_revives_the_row(tmp_path) -> None:
+    """软删后重传同一张图要真的回到在档，不能报「已收录」。"""
+    store = ImageStore(tmp_path / "index.db")
+    store.open(embedder_id="fake-1", dim=8)
+    try:
+        image_id, _ = _add(store, _vectors()[0], "a" * 64)
+        assert store.soft_delete(image_id) is True
+        again, created = _add(store, _vectors()[1], "a" * 64)
+        assert again == image_id and created is True
+        assert store.get(image_id) is not None
+        stats = store.stats()
+        assert stats["live"] == 1 and stats["deleted"] == 0
+    finally:
+        store.close()

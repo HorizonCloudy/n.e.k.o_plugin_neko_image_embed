@@ -7,7 +7,13 @@ from dataclasses import replace
 
 import numpy as np
 from neko_image_embed.engine.config import load_settings
-from neko_image_embed.engine.guard import inspect_image, measure
+from neko_image_embed.engine.guard import (
+    inspect_image,
+    is_blocked_target,
+    measure,
+    path_roots_refusal,
+    resolve_persona_scope,
+)
 from PIL import Image, ImageFilter
 
 LIMITS = load_settings({}).limits
@@ -90,3 +96,46 @@ def test_metrics_are_stable_for_same_pixels() -> None:
     second = measure(image)
     assert first.dhash == second.dhash
     assert first.pixel_sha == second.pixel_sha
+
+def test_internal_url_targets_are_blocked() -> None:
+    blocked = ("127.0.0.1", "::1", "10.0.0.7", "192.168.1.1", "169.254.169.254",
+               "localhost", "db.internal", "[fd00::1]", "",
+               "127.1", "2130706433", "0x7f000001", "100.64.0.1",
+               "[::ffff:127.0.0.1]", "[::ffff:100.100.100.200]")
+    for host in blocked:
+        assert is_blocked_target(host) is True, host
+    for host in ("93.184.216.34", "example.com", "img.example.test",
+                 "2001:4860:4860::8888", "cafe.babe"):
+        assert is_blocked_target(host) is False, host
+
+
+def test_path_roots_gate(tmp_path) -> None:
+    inside = tmp_path / "pics" / "a.jpg"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_bytes(b"x")
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(b"x")
+    assert path_roots_refusal(inside, ()) == ""
+    assert path_roots_refusal(inside, (str(inside.parent),)) == ""
+    assert path_roots_refusal(outside, (str(inside.parent),)) != ""
+
+
+def test_persona_scope_gate() -> None:
+    assert resolve_persona_scope("", "YUI", True) == ("YUI", False)
+    assert resolve_persona_scope("YUI", "YUI", False) == ("YUI", False)
+    assert resolve_persona_scope("阿香", "YUI", True) == ("阿香", False)
+    assert resolve_persona_scope("阿香", "YUI", False) == ("YUI", True)
+    # 当前角色未知时开关关着，也不许自己点档口
+    assert resolve_persona_scope("阿香", "", False) == ("", True)
+
+
+def test_new_gates_default_to_old_behaviour() -> None:
+    settings = load_settings({})
+    assert settings.allow_cross_persona is True
+    assert settings.path_roots == ()
+    custom = load_settings({"image_embed": {
+        "allow_cross_persona": False,
+        "path_roots": ["D:/pics", "  "],
+    }})
+    assert custom.allow_cross_persona is False
+    assert custom.path_roots == ("D:/pics",)

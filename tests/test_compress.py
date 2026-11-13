@@ -56,3 +56,8 @@ def test_thumbnail_respects_edge() -> None:
     with Image.open(io.BytesIO(payload)) as thumb:
         assert max(thumb.size) <= 256
         assert thumb.format == "JPEG"
+
+def test_deep_downscale_is_allowed() -> None:
+    """纯噪声 1280px 要缩几档才进得了 100KB；旧实现在第 10 次保存就报压不下。"""
+    result = compress(_noise(), long_edge=1280, quality=82, max_bytes=100 * 1024)
+    assert result.bytes <= 100 * 1024

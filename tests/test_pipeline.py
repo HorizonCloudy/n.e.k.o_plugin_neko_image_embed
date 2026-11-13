@@ -236,3 +236,48 @@ def test_search_translates_chinese_query(tmp_path) -> None:
         assert embedder.texts == ["cat"]
     finally:
         store.close()
+
+
+def test_hard_delete_refuses_a_row_that_changed(tmp_path) -> None:
+    """回收前记录被人复活：带 expect_deleted 的删除必须不生效。"""
+    _settings, store, pipeline = _build(tmp_path)
+    data = _jpeg(seed=41)
+    try:
+        first = asyncio.run(pipeline.run(data, lanlan="YUI"))
+        assert first.accepted
+        store.soft_delete(first.image_id)
+        assert store.hard_delete(first.image_id, expect_deleted=0) is False
+        assert store.stats()["total"] == 1
+        assert store.hard_delete(first.image_id, expect_deleted=1) is True
+        assert store.stats()["total"] == 0
+    finally:
+        store.close()
+
+
+def test_gc_keeps_files_of_a_row_revived_midrun(tmp_path) -> None:
+    """GC 挑完墓碑、还没删的当口有人重传：记录留下，文件也留下。"""
+    _settings, store, pipeline = _build(tmp_path)
+    data = _jpeg(seed=43)
+    original = store.take_deleted
+
+    def revive_after_pick(**kwargs):
+        rows = original(**kwargs)
+        if rows:
+            asyncio.run(pipeline.run(data, lanlan="YUI"))
+        return rows
+
+    store.take_deleted = revive_after_pick  # type: ignore[method-assign]
+    media = tmp_path / "images" / "YUI" / "media" / f"{hashlib.sha256(data).hexdigest()}.jpg"
+    try:
+        first = asyncio.run(pipeline.run(data, lanlan="YUI"))
+        assert first.accepted
+        store.soft_delete(first.image_id)
+        report = collect_garbage(
+            store, tmp_path / "images" / "YUI", deleted_before=9e18, limit=10
+        )
+        assert report["removed"] == []
+        assert report["failures"] == []
+        assert store.stats()["live"] == 1
+        assert media.exists()
+    finally:
+        store.close()

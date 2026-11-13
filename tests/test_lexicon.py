@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from neko_image_embed.engine.config import load_settings
-from neko_image_embed.engine.lexicon import translate_query
+from neko_image_embed.engine.lexicon import UNTRUSTED_MARK, mark_untrusted, translate_query
 
 
 def test_exact_alias() -> None:
@@ -45,3 +45,9 @@ def test_config_rejects_non_table() -> None:
     settings = load_settings({"image_embed": {"query_aliases": ["猫"]}})
     assert settings.query_aliases == {}
     assert any("期望表" in warning for warning in settings.warnings)
+
+
+def test_mark_untrusted() -> None:
+    assert mark_untrusted("一只橘猫") == f"{UNTRUSTED_MARK} 一只橘猫"
+    assert mark_untrusted("") == ""
+    assert mark_untrusted("   ") == ""

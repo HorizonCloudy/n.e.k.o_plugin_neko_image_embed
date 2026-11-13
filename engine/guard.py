@@ -5,15 +5,19 @@
 
 * 结构合规：字节数、像素数（防解压炸弹）、能否解码、动图策略；
 * 隐私合规：EXIF（含 GPS）在这里随解码一起丢弃，绝不落到磁盘；
-* 价值粗筛：清晰度、熵、亮度/对比度、纯色、近似重复（dHash）。
+* 价值粗筛：清晰度、熵、亮度/对比度、纯色、近似重复（dHash）；
+* 来源合规：URL 不许指向本机或内网，本地路径可按 path_roots 收口。
 
 真正的语义价值判断交给 judge 链；这里只做「不合格就拒」和「指标采集」。
 """
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -182,3 +186,65 @@ def digest_for_prompt(metrics: Metrics | None, probe: Probe | None) -> str:
         f"清晰度={metrics.sharpness} 亮度={metrics.brightness} 对比度={metrics.contrast} "
         f"熵={metrics.entropy} 主色数={metrics.unique_colors}"
     )
+
+
+# --------------------------------------------------------------------------- 来源闸门
+
+
+# 看着像 IP 字面量而不是域名的字符集。127.1 / 2130706433 / 0x7f000001 过不了
+# ipaddress 的严格解析，但 glibc 会把它们解成环回，所以一律拒。
+# 代价：cafe1.babe 这类「全是十六进制味又带数字」的域名会被误拒，宁可错杀。
+_NUMERICISH = re.compile(r"[0-9a-fA-FxX.:%_-]+")
+
+
+def is_blocked_target(host: str) -> bool:
+    """URL 主机是否指向本机或内网。默认拦，免得 source=url 变成内网探针。"""
+    name = (host or "").strip().lower().rstrip(".")
+    if not name:
+        return True
+    if name in {"localhost", "metadata.google.internal"}:
+        return True
+    if name.endswith((".local", ".internal", ".lan", ".home.arpa")):
+        return True
+    literal = name[1:-1].split("%")[0] if name.startswith("[") else name
+    try:
+        address = ipaddress.ip_address(literal)
+    except ValueError:
+        # shortcut: 普通域名不做 DNS 解析，所以「域名指向 127.0.0.1」这一类拦不住；
+        # 真要拦得连上之后再校验地址，等碰上再说。
+        return bool(_NUMERICISH.fullmatch(literal) and any(ch.isdigit() for ch in literal))
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped  # 早的 3.11 补丁版会把映射地址判成 global
+    return not address.is_global
+
+
+def resolve_persona_scope(requested: str, current: str, allow_cross: bool) -> tuple[str, bool]:
+    """这一枪该打哪个角色的档，返回 (角色名, 是否忽略了跨档请求)。"""
+    wanted = (requested or "").strip()
+    now = (current or "").strip()
+    if not wanted or wanted == now:
+        return now, False
+    if allow_cross:
+        return wanted, False
+    if not now:
+        # 当前角色未知也要拒：否则关了开关反而只剩「自己指定档口」一条路。
+        return "", True
+    return now, True
+
+
+def path_roots_refusal(path: Path, roots: tuple[str, ...]) -> str:
+    """path_roots 为空时放行（沿用老行为）；非空则只准读这些目录底下的文件。"""
+    if not roots:
+        return ""
+    try:
+        target = path.resolve()
+    except OSError:
+        return f"无法解析路径 {path}"
+    for root in roots:
+        try:
+            base = Path(root).expanduser().resolve()
+        except OSError:
+            continue
+        if target == base or target.is_relative_to(base):
+            return ""
+    return f"{target} 不在 image_embed.path_roots 列出的目录里"

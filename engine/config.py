@@ -21,6 +21,11 @@ KNOWN_ENGINES: tuple[str, ...] = (
 )
 LOCAL_ENGINES: tuple[str, ...] = ("zeroshot", "rules")
 VALID_PROTOCOLS = ("openai_chat", "systemone")
+# [image_embed.judge.<名字>] 表出现即注册成引擎，所以任何 OpenAI 兼容或 SystemOne
+# 端点都能进链；内置名只在这里给出默认协议，不是白名单。
+RESERVED_JUDGE_KEYS = frozenset(
+    {"mode", "order", "perception", "timeout_seconds", "max_completion_tokens"},
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,8 @@ class Settings:
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     persona_summary: str = ""
     characters_path: str = ""
+    allow_cross_persona: bool = True
+    path_roots: tuple[str, ...] = ()
     watch_frames: bool = False
     watch_interval_seconds: int = 30
     query_aliases: dict[str, str] = field(default_factory=dict)
@@ -262,15 +269,30 @@ def load_settings(raw: Any) -> Settings:
     )
 
     judge_raw = _section(section, "judge")
+    engine_names = list(KNOWN_ENGINES)
+    for key, item in judge_raw.items():
+        extra = str(key).strip()
+        if (
+            isinstance(item, dict)
+            and extra
+            and extra not in engine_names
+            and extra not in RESERVED_JUDGE_KEYS
+        ):
+            engine_names.append(extra)
+    engines = {
+        name: _parse_engine(name, _section(judge_raw, name), reader)
+        for name in engine_names
+    }
+
     perception_raw = judge_raw.get("perception", list(DEFAULT_PERCEPTION))
     perception: list[str] = []
     if isinstance(perception_raw, (list, tuple)):
         for item in perception_raw:
             name = str(item).strip()
-            if name in ("sensenova", "zeroshot") and name not in perception:
+            if (name in engines or name in LOCAL_ENGINES) and name not in perception:
                 perception.append(name)
             elif name:
-                warnings.append(f"judge.perception: 忽略未知识图引擎 {name!r}")
+                warnings.append(f"judge.perception: 忽略未知引擎 {name!r}")
     if not perception:
         perception = list(DEFAULT_PERCEPTION)
 
@@ -297,17 +319,17 @@ def load_settings(raw: Any) -> Settings:
             if name in KNOWN_ENGINES or name in LOCAL_ENGINES:
                 if name not in order:
                     order.append(name)
+            elif name in engines:
+                warnings.append(
+                    f"judge.order: {name!r} 只在识图链生效（judge.perception），"
+                    f"判断层候选由 judge.mode 决定"
+                )
             else:
                 warnings.append(f"judge.order: 忽略未知引擎 {name!r}")
     else:
         warnings.append("judge.order: 期望数组，已回落到默认顺序")
     if "rules" not in order:
         order.append("rules")
-
-    engines = {
-        name: _parse_engine(name, _section(judge_raw, name), reader)
-        for name in KNOWN_ENGINES
-    }
 
     judge = JudgeConfig(
         mode=mode,
@@ -318,6 +340,13 @@ def load_settings(raw: Any) -> Settings:
         engines=engines,
     )
 
+    roots_raw = section.get("path_roots", [])
+    path_roots: tuple[str, ...] = ()
+    if isinstance(roots_raw, (list, tuple)):
+        path_roots = tuple(str(item).strip() for item in roots_raw if str(item).strip())
+    elif roots_raw:
+        warnings.append("path_roots: 期望字符串数组，已忽略")
+
     return Settings(
         limits=limits,
         storage=storage,
@@ -325,6 +354,8 @@ def load_settings(raw: Any) -> Settings:
         judge=judge,
         persona_summary=reader.text(section, "persona_summary"),
         characters_path=reader.text(section, "characters_path"),
+        allow_cross_persona=reader.bool(section, "allow_cross_persona", True),
+        path_roots=path_roots,
         watch_frames=reader.bool(section, "watch_frames", False),
         watch_interval_seconds=reader.int(section, "watch_interval_seconds", 30, lo=5, hi=3600),
         query_aliases=reader.mapping(section, "query_aliases"),

@@ -136,7 +136,9 @@ class IngestPipeline:
         media_root = self._archives.media_root(lanlan)
 
         started = time.perf_counter()
-        guard = inspect_image(data, limits, allow_animated=storage.allow_animated)
+        guard = await asyncio.to_thread(
+            inspect_image, data, limits, allow_animated=storage.allow_animated
+        )
         stages.append(
             StageResult("guard", (time.perf_counter() - started) * 1000, guard.ok, guard.code)
         )
@@ -177,7 +179,7 @@ class IngestPipeline:
             )
 
         preview_started = time.perf_counter()
-        preview_b64 = _preview_b64(guard.image)
+        preview_b64 = await asyncio.to_thread(_preview_b64, guard.image)
         stages.append(
             StageResult(
                 "preview",
@@ -240,7 +242,8 @@ class IngestPipeline:
 
         compress_started = time.perf_counter()
         try:
-            compressed = compress(
+            compressed = await asyncio.to_thread(
+                compress,
                 guard.image,
                 long_edge=storage.long_edge,
                 quality=storage.jpeg_quality,
@@ -249,8 +252,11 @@ class IngestPipeline:
         except CompressError as exc:
             raise PipelineError("compress_failed", str(exc)) from exc
         try:
-            thumb = make_thumb(
-                guard.image, edge=storage.thumb_edge, quality=storage.thumb_quality
+            thumb = await asyncio.to_thread(
+                make_thumb,
+                guard.image,
+                edge=storage.thumb_edge,
+                quality=storage.thumb_quality,
             )
         except Exception:  # noqa: BLE001 - 缩略图是附属品，失败不影响主流程
             thumb = b""
@@ -366,7 +372,8 @@ class IngestPipeline:
         # 中文查询先过别名表再交给 CLIP 文本塔；词法加权仍用原查询。
         translated = translate_query(query, self._settings.query_aliases) or query
         vector = await self._embedder.embed_text(translated)
-        return store.search(
+        return await asyncio.to_thread(
+            store.search,
             vector,
             lanlan=lanlan,
             top_k=top_k,
@@ -411,15 +418,27 @@ def collect_garbage(
     removed: list[int] = []
     failures: list[str] = []
 
-    targets = store.take_deleted(before=deleted_before, limit=limit)
+    targets = [
+        (row, 1) for row in store.take_deleted(before=deleted_before, limit=limit)
+    ]
     if keep is not None and len(targets) < limit:
-        targets += store.take_oldest(keep=keep, limit=limit - len(targets))
+        targets += [
+            (row, 0) for row in store.take_oldest(keep=keep, limit=limit - len(targets))
+        ]
 
     seen: set[int] = set()
-    for row in targets:
+    for row, expect in targets:
         if row.id in seen:
             continue
         seen.add(row.id)
+        try:
+            # 先删记录再删文件：这条记录要是被人复活了，DELETE 匹配 0 行，文件必须留下。
+            if not store.hard_delete(row.id, expect_deleted=expect):
+                continue
+            removed.append(row.id)
+        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断整批
+            failures.append(f"#{row.id}: {type(exc).__name__}: {exc}")
+            continue
         for rel in (row.rel_path, row.thumb_path):
             if not rel:
                 continue
@@ -429,10 +448,5 @@ def collect_garbage(
                 failures.append(f"#{row.id}: {exc}")
                 continue
             _remove_quietly(target)
-        try:
-            store.hard_delete(row.id)
-            removed.append(row.id)
-        except Exception as exc:  # noqa: BLE001 - 单条失败不阻断整批
-            failures.append(f"#{row.id}: {type(exc).__name__}: {exc}")
 
     return {"removed": removed, "failures": failures}
